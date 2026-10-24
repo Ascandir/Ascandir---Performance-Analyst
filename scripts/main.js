@@ -1875,7 +1875,7 @@ function receivePlayerReport(msg) {
   state.inbox.unshift(item);
   if (state.inbox.length > INBOX_CAP) state.inbox.length = INBOX_CAP;
   persistInbox();
-  ui.notifications.info(`${item.name} hat einen Performance-Bericht gesendet${item.note ? `: „${item.note.slice(0, 80)}“` : ""}. Öffnen über den Performance-Button → Spieler.`);
+  // Bewusst keine Benachrichtigung beim SL – nur der blaue Punkt am Ampel-Button (stört nicht im Spiel).
   try { game.socket.emit(SOCKET, { t: "pushAck", to: msg.from, gm: game.user.name }); } catch { /* egal */ }
   Health.apply();
   Analyst.refreshSoon();

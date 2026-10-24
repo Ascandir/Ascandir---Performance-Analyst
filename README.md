@@ -24,7 +24,7 @@ Der Analyst steht **SL und Spielern** zur Verfügung (abschaltbar über „Spiel
 
 Ruckelt es bei einem Spieler, öffnet er seinen Analyst und klickt oben auf **An SL senden** (oder Tab **Berichte**). Er kann kurz notieren, was passiert ist. Am besten startet er vorher eine Aufzeichnung und stellt das Problem nach – dann geht die komplette Zeitleiste mit.
 
-Beim SL erscheint eine Benachrichtigung und der blaue Punkt am Button. Die Berichte liegen im Tab **Spieler → Eingegangene Berichte** (die letzten 10, bleiben auch nach Neuladen erhalten) und lassen sich ansehen, als JSON speichern oder im Tab **Berichte** als Zusammenfassung kopieren. Ist kein SL online, wird der Bericht beim Spieler als Datei gespeichert.
+Beim SL poppt **nichts** auf – es erscheint nur still ein blauer Punkt am Ampel-Button. Die Berichte liegen im Tab **Spieler → Eingegangene Berichte** (die letzten 10, bleiben auch nach Neuladen erhalten) und lassen sich ansehen, als JSON speichern oder im Tab **Berichte** als Zusammenfassung kopieren. Ist kein SL online, wird der Bericht beim Spieler als Datei gespeichert.
 
 ## Was gemessen wird
 
