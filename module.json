@@ -2,7 +2,7 @@
   "id": "ascandir-performance-analyst",
   "title": "Ascandir - Performance Analyst",
   "description": "Systemunabhängige Performance-Analyse: misst, wie viel Rechenzeit jedes Modul verbraucht, ordnet Ruckler Modulen zu und prüft im Hintergrund Konsole, Dateien, Texturen und Umgebung auf typische Performance-Fresser. Mit Aufzeichnungen, Export und Spieler-Berichten.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "authors": [
     {
       "name": "Ascandir"

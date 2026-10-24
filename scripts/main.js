@@ -474,36 +474,87 @@ async function resolvePendingOwners() {
 /*  libWrapper messen                                                */
 /* ================================================================ */
 
+function makeLwRegister(lw, orig) {
+  return function __apaLwRegister(pkg, target, fn, type, options) {
+    let wrapped = fn;
+    try {
+      if (typeof fn === "function") {
+        const owner = normalizePackage(pkg);
+        const label = typeof target === "string" ? target : "libWrapper";
+        const isOverride = String(type ?? "").toUpperCase().includes("OVERRIDE");
+        wrapped = function __apaLwCall(...args) {
+          if (!isOverride && typeof args[0] === "function") {
+            const next = args[0];
+            args[0] = function __apaLwNext(...a) { return __apaTimed(null, null, null, next, this, a); };
+          }
+          return __apaTimed(owner, label, "wrap", fn, this, args);
+        };
+        state.lwPatched++;
+      }
+    } catch { wrapped = fn; }
+    return orig.call(lw, pkg, target, wrapped, type, options);
+  };
+}
+
+/**
+ * libWrapper ist schreibgeschützt. Statt es zu verändern, legen wir eine Hülle davor:
+ * Alle Eigenschaften werden 1:1 an das echte libWrapper durchgereicht, nur "register" misst mit.
+ */
+function makeLwShim(lw, register) {
+  const shim = function libWrapper(...args) { return new.target ? Reflect.construct(lw, args, new.target) : lw.apply(this, args); };
+  const seen = new Set(["register", "length", "name", "prototype", "arguments", "caller"]);
+  for (let obj = lw; obj && obj !== Function.prototype && obj !== Object.prototype; obj = Object.getPrototypeOf(obj)) {
+    for (const key of Reflect.ownKeys(obj)) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const d = Object.getOwnPropertyDescriptor(obj, key);
+      if (!d) continue;
+      if ("value" in d) {
+        const v = d.value;
+        Object.defineProperty(shim, key, { get: () => (typeof v === "function" ? v.bind(lw) : lw[key]), set: (nv) => { lw[key] = nv; }, enumerable: d.enumerable, configurable: true });
+      } else {
+        Object.defineProperty(shim, key, { get: () => lw[key], set: d.set ? (nv) => { lw[key] = nv; } : undefined, enumerable: d.enumerable, configurable: true });
+      }
+    }
+  }
+  Object.defineProperty(shim, "register", { value: register, configurable: true, writable: true });
+  Object.defineProperty(shim, "__apaPatched", { value: true });
+  Object.defineProperty(shim, "__apaOriginal", { value: lw });
+  try { Object.defineProperty(shim, "prototype", { value: lw.prototype }); } catch { /* egal */ }
+  return shim;
+}
+
 function patchLibWrapper() {
   const lw = globalThis.libWrapper;
   if (!lw || lw.__apaPatched) return;
   const orig = lw.register;
   if (typeof orig !== "function") return;
+  const register = makeLwRegister(lw, orig);
+
+  // 1. Versuch: direkt ersetzen.
   try {
-    lw.register = function __apaLwRegister(pkg, target, fn, type, options) {
-      let wrapped = fn;
-      try {
-        if (typeof fn === "function") {
-          const owner = normalizePackage(pkg);
-          const label = typeof target === "string" ? target : "libWrapper";
-          const isOverride = String(type ?? "").toUpperCase().includes("OVERRIDE");
-          wrapped = function __apaLwCall(...args) {
-            if (!isOverride && typeof args[0] === "function") {
-              const next = args[0];
-              args[0] = function __apaLwNext(...a) { return __apaTimed(null, null, null, next, this, a); };
-            }
-            return __apaTimed(owner, label, "wrap", fn, this, args);
-          };
-          state.lwPatched++;
-        }
-      } catch { wrapped = fn; }
-      return orig.call(this, pkg, target, wrapped, type, options);
-    };
-    lw.__apaPatched = true;
-    state.lwMode = "aktiv";
-  } catch {
-    state.lwMode = "nicht möglich";
+    lw.register = register;
+    if (lw.register === register) {
+      try { lw.__apaPatched = true; } catch { /* egal */ }
+      state.lwMode = "aktiv";
+      return;
+    }
+  } catch { /* schreibgeschützt */ }
+
+  // 2. Versuch: Hülle vor das globale libWrapper setzen.
+  try {
+    const shim = makeLwShim(lw, register);
+    const desc = Object.getOwnPropertyDescriptor(globalThis, "libWrapper");
+    if (!desc || desc.writable || desc.set) globalThis.libWrapper = shim;
+    else if (desc.configurable) Object.defineProperty(globalThis, "libWrapper", { ...desc, value: shim });
+    if (globalThis.libWrapper === shim) {
+      state.lwMode = "aktiv (über Hülle)";
+      return;
+    }
+  } catch (err) {
+    console.debug("Performance Analyst | libWrapper", err);
   }
+  state.lwMode = "nicht möglich";
 }
 
 /* ================================================================ */
@@ -844,6 +895,9 @@ function noteFailedAsset(url, kind, status = null) {
   f.count++;
   if (status) f.status = status;
   state.failedAssets.set(key, f);
+  // API-Abfragen ohne Dateiendung (z. B. /api/plutonium) sind meist harmlose Prüfungen.
+  const isFile = /\.[a-z0-9]{2,5}$/i.test(f.path);
+  if (!isFile && f.count < 10) return;
   addIssue(`fail:${key}`, "warn", "Datei nicht gefunden / nicht ladbar", `${f.path}${f.status ? ` (Status ${f.status})` : ""}. Fehlende Dateien lösen bei jedem Versuch erneut Anfragen und Fehler aus.`, f.owner);
 }
 
@@ -1317,6 +1371,7 @@ function buildReport(scope, { timeline = true, maxAssets = 150, maxConsole = 300
       avgFps: f.total ? round((f.count * 1000) / f.total, 1) : null,
       minFps: f.fpsMin !== null ? round(f.fpsMin, 1) : null,
       currentFps: round(currentFps, 1),
+      canvasFps: globalThis.canvas?.app?.ticker?.FPS ? round(globalThis.canvas.app.ticker.FPS, 0) : null,
       j50: f.j50, j100: f.j100, j250: f.j250,
       worst: round(f.worst, 1),
       medianFps: fpsVals.length ? [...fpsVals].sort((a, b) => a - b)[Math.floor(fpsVals.length / 2)] : null
@@ -1349,7 +1404,7 @@ function summaryText(r) {
   L.push(`# Performance-Bericht (${m.scope === "rec" ? "Aufzeichnung" : "seit Laden"}${m.label ? `: ${m.label}` : ""})`);
   L.push(`Dauer: ${fmtDuration(m.durationMs)} · Nutzer: ${m.user}${m.isGM ? " (SL)" : ""} · Szene: ${m.scene || "–"}`);
   L.push(`Foundry ${r.env.foundry} · ${r.env.system} · ${r.env.browser} · GPU: ${r.env.gpu ?? "?"} · Module aktiv: ${r.env.modulesActive}`);
-  L.push(`Bildrate: Ø ${r.frames.avgFps ?? "?"} FPS, min ${r.frames.minFps ?? "?"} · Ruckler >100 ms: ${r.frames.j100}, >250 ms: ${r.frames.j250}, schlimmster: ${r.frames.worst} ms`);
+  L.push(`Bildrate Browser: Ø ${r.frames.avgFps ?? "?"} FPS, min ${r.frames.minFps ?? "?"}${r.frames.canvasFps ? ` · Canvas ${r.frames.canvasFps} FPS` : ""} · Ruckler >100 ms: ${r.frames.j100}, >250 ms: ${r.frames.j250}, schlimmster: ${r.frames.worst} ms`);
   if (r.sample) L.push(`HTML-Elemente: ${r.sample.dom}${r.sample.heap ? ` · JS-Speicher: ${mb(r.sample.heap)} MB` : ""}`);
   if (r.phases.ready) L.push(`Start: init ${fmtMs(r.phases.init)}, ready ${fmtMs(r.phases.ready)}${r.phases.firstCanvas ? `, erste Szene ${fmtMs(r.phases.firstCanvas)}` : ""}`);
   L.push("");
@@ -1643,7 +1698,7 @@ function tabOverview(r, ctx) {
   const crit = r.issues.filter((i) => i.severity === "critical").length;
   return `
   <div class="apa-stats">
-    ${stat("Ø Bildrate", f.avgFps !== null ? `${f.avgFps} FPS` : "–", `aktuell ${f.currentFps ?? "–"} · min ${f.minFps ?? "–"}`, fpsCls)}
+    ${stat("Ø Bildrate Browser", f.avgFps !== null ? `${f.avgFps} FPS` : "–", `aktuell ${f.currentFps ?? "–"} · min ${f.minFps ?? "–"}${f.canvasFps ? ` · Canvas ${f.canvasFps} FPS` : ""}`, fpsCls)}
     ${stat("Ruckler", `${f.j100}`, `>100 ms · ${f.j250}× >250 ms · max ${f.worst} ms`, f.j250 > 5 ? "bad" : f.j100 > 20 ? "meh" : "good")}
     ${stat("Probleme", `${r.issues.length}`, `${crit} kritisch`, crit ? "bad" : r.issues.length ? "meh" : "good")}
     ${stat("Konsole", `${errs}`, `Fehler · ${deps} veraltete Aufrufe`, errs > 50 ? "bad" : errs ? "meh" : "good")}
@@ -1912,7 +1967,8 @@ class AnalystApp extends ApplicationV2 {
     window: { title: "Ascandir - Performance Analyst", icon: "fa-solid fa-gauge-high", resizable: true },
     position: { width: 1040, height: 720 },
     actions: {
-      tab(event, target) { Analyst.state.tab = target.dataset.tab; this.render(); },
+      // Hinweis: "tab" ist in ApplicationV2 reserviert (eigene Tab-Gruppen) – daher "apaTab".
+      apaTab(event, target) { Analyst.state.tab = target.dataset.tab; this.render(); },
       sort(event, target) {
         const k = target.dataset.key;
         if (Analyst.state.sort === k) Analyst.state.sortDir *= -1;
@@ -2009,7 +2065,7 @@ class AnalystApp extends ApplicationV2 {
 
     return `
       <div class="apa-head">
-        <nav class="apa-tabs">${tabs.map(([id, label, icon]) => `<a class="${ctx.tab === id ? "active" : ""}" data-action="tab" data-tab="${id}"><i class="${icon}"></i> ${label}</a>`).join("")}</nav>
+        <nav class="apa-tabs">${tabs.map(([id, label, icon]) => `<a class="${ctx.tab === id ? "active" : ""}" data-action="apaTab" data-tab="${id}"><i class="${icon}"></i> ${label}</a>`).join("")}</nav>
         <div class="apa-head-right">
           <select name="view">${views.join("")}</select>
           ${recCtl}
