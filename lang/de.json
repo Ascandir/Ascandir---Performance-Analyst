@@ -14,7 +14,7 @@
       "NotifyCritical": "Nur kritische Probleme",
       "NotifyAll": "Kritische Probleme und Warnungen",
       "RefreshName": "Fenster automatisch aktualisieren",
-      "RefreshHint": "Aktualisiert die Live-Ansicht alle 2,5 Sekunden.",
+      "RefreshHint": "Aktualisiert die Live-Ansicht alle 4 Sekunden.",
       "RemoteName": "Spieler-Berichte erlauben",
       "RemoteHint": "Der Spielleiter darf die Messwerte der Spieler-Browser einsammeln (Browser, Grafikkarte, FPS, Modul-Laufzeiten, Probleme).",
       "limitImageMBName": "Grenze für Bilder (MB)",
@@ -22,7 +22,11 @@
       "limitAudioMBName": "Grenze für Audio (MB)",
       "limitAudioMBHint": "Größere Audiodateien werden als Problem gemeldet.",
       "limitVideoMBName": "Grenze für Videos (MB)",
-      "limitVideoMBHint": "Größere Videodateien werden als Problem gemeldet."
+      "limitVideoMBHint": "Größere Videodateien werden als Problem gemeldet.",
+      "ButtonName": "Ampel-Button in der Steuerleiste",
+      "ButtonHint": "Zeigt ganz links einen Performance-Button, der gelb wird bei Auffälligkeiten und rot bei echten Problemen. Klick öffnet den Analyst, Rechtsklick startet/beendet eine 5-Minuten-Aufzeichnung.",
+      "AccessName": "Spieler dürfen den Analyst nutzen",
+      "AccessHint": "Spieler können das Fenster und den Ampel-Button verwenden und ihre eigenen Messwerte sehen. Welt-Prüfung und Spieler-Berichte bleiben dem Spielleiter vorbehalten."
     },
     "Keybinding": {
       "Open": "Performance Analyst öffnen"

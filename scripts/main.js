@@ -69,19 +69,51 @@ const OWNER_CORE = "core";
 const OWNER_UNKNOWN = "unknown";
 const OWNER_PENDING = "pending";
 const OWNER_RENDER = "render";
+const OWNER_CANVAS = "canvas";
 const PATH_RE = /\/(modules|systems)\/([^/\s?#):]+)\//;
 const CORE_RE = /foundry\.mjs|\/scripts\/foundry|\/common\/|\/client\//;
 
 /** Wandelt eine URL (oder Pfad) in einen Besitzer um: Modul-ID, "system:<id>", "world", "data". */
 function ownerFromUrl(url) {
   if (!url) return null;
-  let u = String(url);
+  let u = String(url).replace(/(:\d+){1,2}$/, "");
   try { u = decodeURIComponent(u); } catch { /* bleibt roh */ }
   const m = u.match(PATH_RE);
   if (m) return m[1] === "systems" ? `system:${m[2]}` : m[2];
   if (/\/worlds\//.test(u)) return "world";
+  if (/pixi/i.test(u)) return OWNER_CANVAS;
   if (CORE_RE.test(u)) return OWNER_CORE;
+  // Jede andere Skriptdatei vom eigenen Foundry-Server gehört zu Foundry selbst.
+  try {
+    const x = new URL(u, location.href);
+    if (x.origin === location.origin && /\.m?js$/i.test(x.pathname)) return OWNER_CORE;
+  } catch { /* keine URL */ }
   return null;
+}
+
+const URL_IN_LINE = /((?:https?|file):\/\/[^\s)]+?)(?::\d+){0,2}(?:\)|\s|$)/;
+
+/** Erste Codestelle im Stack, die nicht zu uns gehört – zur Fehlersuche bei unbekannten Besitzern. */
+function stackSite(stack) {
+  for (const line of String(stack ?? "").split("\n")) {
+    if (line.includes("__apa")) continue;
+    const m = line.match(URL_IN_LINE);
+    if (!m) continue;
+    const fn = line.trim().replace(/^at\s+/, "").split(/[ @(]/)[0];
+    return `${fn && !fn.startsWith("http") ? `${fn} – ` : ""}${shortUrl(line.match(/((?:https?|file):\/\/[^\s)]+)/)?.[1] ?? "")}`;
+  }
+  return "";
+}
+
+function shortUrl(url) {
+  if (!url) return "";
+  try {
+    const x = new URL(url, location.href);
+    const path = decodeURIComponent(x.pathname);
+    const host = x.origin === location.origin ? "" : x.host;
+    const parts = path.split("/").filter(Boolean);
+    return `${host}${parts.length > 3 ? `…/${parts.slice(-3).join("/")}` : `/${parts.join("/")}`}`;
+  } catch { return String(url).slice(-80); }
 }
 
 /** Liest aus einem Stacktrace das erste Modul/System, das nicht zu unserer Mess-Infrastruktur gehört. */
@@ -92,11 +124,26 @@ function ownerFromStack(stack) {
     if (line.includes("__apa")) continue;
     let u = line;
     try { u = decodeURIComponent(line); } catch { /* roh */ }
-    const m = u.match(PATH_RE);
-    if (m) return m[1] === "systems" ? `system:${m[2]}` : m[2];
-    if (CORE_RE.test(u)) sawCore = true;
+    const url = u.match(/((?:https?|file):\/\/[^\s)]+)/)?.[1] ?? u;
+    const o = ownerFromUrl(url);
+    if (o === OWNER_CORE || o === OWNER_CANVAS) { sawCore = true; continue; }
+    if (o && o !== "data") return o;
   }
   return sawCore ? OWNER_CORE : null;
+}
+
+/** Wie __apaCapture, liefert aber zusätzlich die Codestelle (für unbekannte Besitzer). */
+function __apaCaptureFull() {
+  let stack = "";
+  const old = Error.stackTraceLimit;
+  try {
+    Error.stackTraceLimit = 40;
+    stack = new Error().stack ?? "";
+  } catch { /* egal */ } finally {
+    try { Error.stackTraceLimit = old; } catch { /* egal */ }
+  }
+  const owner = ownerFromStack(stack) ?? OWNER_UNKNOWN;
+  return { owner, site: owner === OWNER_UNKNOWN ? stackSite(stack) : "" };
 }
 
 /** Erzeugt einen Stacktrace an der aktuellen Stelle und ordnet ihn zu. */
@@ -118,7 +165,8 @@ function ownerLabel(id) {
   if (id === OWNER_CORE) return "Foundry-Kern";
   if (id === OWNER_UNKNOWN) return "Nicht zuordenbar";
   if (isPending(id)) return "Wird noch zugeordnet …";
-  if (id === OWNER_RENDER) return "Canvas-Rendering / Browser";
+  if (id === OWNER_RENDER) return "Browser (Zeichnen, Layout, Aufräumen)";
+  if (id === OWNER_CANVAS) return "Canvas-Zeichenschleife (PIXI)";
   if (id === "world") return "Welt-Dateien";
   if (id === "data") return "Eigene Dateien (Data)";
   if (id.startsWith("system:")) {
@@ -134,6 +182,7 @@ function ownerKind(id) {
   if (id === OWNER_CORE) return "core";
   if (id === MODULE_ID) return "self";
   if (id?.startsWith("system:")) return "system";
+  if (id === OWNER_CANVAS) return "core";
   if (isPending(id) || [OWNER_UNKNOWN, OWNER_RENDER, "world", "data"].includes(id)) return "other";
   return "module";
 }
@@ -206,6 +255,7 @@ const state = {
   phases: { script: STARTED_AT, init: null, setup: null, ready: null, firstCanvas: null },
   scenes: [],         // {name, ms, at}
   canvasInitAt: null,
+  sceneLoading: false,
   hookMode: WATCH_ENABLED ? "aktiv" : "aus",
   lwMode: "nicht vorhanden",
   lwPatched: 0,
@@ -218,6 +268,7 @@ const state = {
   textures: null,
   world: null,
   clients: new Map(), // userId -> {name, at, report, pending}
+  inbox: [],          // von Spielern gesendete Berichte (nur SL)
   pendingNotes: [],
   pendingSourceSearch: true
 };
@@ -307,10 +358,10 @@ const OWNER = Symbol("apaOwner");
 const pendingWrappers = [];
 const isPending = (id) => typeof id === "string" && id.startsWith(OWNER_PENDING);
 
-function wrapEntry(H, entry, owner) {
+function wrapEntry(H, entry, owner, site = "") {
   if (!entry || typeof entry.fn !== "function" || entry.fn[WRAPPED]) return false;
   const orig = entry.fn;
-  const label = entry.hook;
+  const label = site ? `${entry.hook} ← ${site}` : entry.hook;
   const w = function __apaHook(...args) {
     return __apaTimed(w[OWNER], label, "hook", orig, this, args);
   };
@@ -368,7 +419,10 @@ function patchHooks() {
     const id = origOn.call(this, hook, fn, options);
     try {
       const entry = findEntry(H, hook, id);
-      if (entry && !entry.fn?.[WRAPPED]) wrapEntry(H, entry, __apaCapture());
+      if (entry && !entry.fn?.[WRAPPED]) {
+        const c = __apaCaptureFull();
+        wrapEntry(H, entry, c.owner, c.site);
+      }
     } catch { /* Messen darf nie das Spiel stören */ }
     return id;
   };
@@ -377,7 +431,10 @@ function patchHooks() {
     const id = origOnce.call(this, hook, fn);
     try {
       const entry = findEntry(H, hook, id);
-      if (entry && !entry.fn?.[WRAPPED]) wrapEntry(H, entry, __apaCapture());
+      if (entry && !entry.fn?.[WRAPPED]) {
+        const c = __apaCaptureFull();
+        wrapEntry(H, entry, c.owner, c.site);
+      }
     } catch { /* egal */ }
     return id;
   };
@@ -604,26 +661,67 @@ function onFrame(start, end, d) {
   if (d >= 50 && !state.loafSupported) registerLongFrame(start, d, "Bildwechsel", []);
 }
 
-function registerLongFrame(start, dur, source, scripts) {
+/**
+ * Ordnet einen langen Frame zu.
+ * spans   = gemessene Hook-/libWrapper-Zeiten (Eigenzeit, genau einem Modul zugeordnet)
+ * scripts = vom Browser gemeldete Skripte (Long Animation Frames, nur Chromium). Deren Zeit
+ *           enthält auch die darin aufgerufenen Hooks – die ziehen wir ab, sonst zählt alles doppelt.
+ * layoutMs = vom Browser gemeldete Zeit für Zeichnen/Layout.
+ */
+function registerLongFrame(start, dur, source, scripts, layoutMs = 0) {
   const end = start + dur;
   const contrib = new Map();
+  const details = [];
+  const inFrame = [];
   for (const sp of spans) {
     if (!sp || sp.t0 < start - 2 || sp.t0 > end) continue;
+    inFrame.push(sp);
     contrib.set(sp.owner, (contrib.get(sp.owner) ?? 0) + sp.self);
   }
+  const spanAgg = new Map();
+  for (const sp of inFrame) {
+    const k = `${sp.owner}|${sp.label}`;
+    const a = spanAgg.get(k) ?? { owner: sp.owner, what: sp.label, ms: 0, n: 0 };
+    a.ms += sp.self;
+    a.n++;
+    spanAgg.set(k, a);
+  }
+  for (const a of spanAgg.values()) details.push({ owner: a.owner, ms: round(a.ms, 1), what: `${a.what}${a.n > 1 ? ` (${a.n}×)` : ""}` });
+
   for (const sc of scripts) {
-    const o = ownerFromUrl(sc.url) ?? OWNER_UNKNOWN;
-    contrib.set(o, Math.max(contrib.get(o) ?? 0, sc.ms));
+    let o = ownerFromUrl(sc.url);
+    if (!o || o === "data") o = OWNER_UNKNOWN;
+    // Hook-Zeiten anderer Besitzer, die innerhalb dieses Skripts liefen, abziehen.
+    let inner = 0;
+    if (sc.start) for (const sp of inFrame) if (sp.owner !== o && sp.t0 >= sc.start - 1 && sp.t0 <= sc.start + sc.ms) inner += sp.self;
+    const own = Math.max(0, sc.ms - inner);
+    if (own < 1) continue;
+    contrib.set(o, (contrib.get(o) ?? 0) + own);
+    const fn = sc.fn ? `${sc.fn}()` : "";
+    const where = sc.url ? shortUrl(sc.url) : "";
+    details.push({ owner: o, ms: round(own, 1), what: [fn, sc.invoker, where].filter(Boolean).join(" · ") || "(keine Angabe vom Browser)" });
   }
   let sum = 0;
   for (const v of contrib.values()) sum += v;
   const rest = dur - sum;
-  if (rest > 5) contrib.set(OWNER_RENDER, (contrib.get(OWNER_RENDER) ?? 0) + rest);
+  if (rest > 5) {
+    contrib.set(OWNER_RENDER, (contrib.get(OWNER_RENDER) ?? 0) + rest);
+    details.push({ owner: OWNER_RENDER, ms: round(rest, 1), what: layoutMs > 1 ? `davon Zeichnen/Layout ${round(layoutMs, 0)} ms` : "nicht aufschlüsselbar (z. B. Zeichnen, Garbage Collection)" });
+  }
   const owners = [...contrib.entries()]
     .map(([id, ms]) => ({ id, ms: round(Math.min(ms, dur), 1) }))
+    .filter((o) => o.ms >= 0.5)
     .sort((a, b) => b.ms - a.ms)
     .slice(0, 6);
-  const lf = { t: Date.now() - Math.max(0, now() - start), dur: round(dur, 1), source, owners };
+  const phase = !state.ready ? "Weltstart" : (state.sceneLoading ? "Szenenwechsel" : "");
+  const lf = {
+    t: Date.now() - Math.max(0, now() - start),
+    dur: round(dur, 1),
+    source,
+    phase,
+    owners,
+    details: details.sort((a, b) => b.ms - a.ms).slice(0, 8)
+  };
   forScopes((s) => {
     s.longFrames.push(lf);
     if (s.longFrames.length > LONGFRAME_CAP) s.longFrames.shift();
@@ -634,7 +732,8 @@ function registerLongFrame(start, dur, source, scripts) {
       st.jankMs += o.ms;
     }
   });
-  timelinePush({ type: "ruckler", ms: lf.dur, owners: owners.slice(0, 3).map((o) => `${o.id}:${o.ms}`).join(", ") });
+  timelinePush({ type: "ruckler", ms: lf.dur, phase, owners: owners.slice(0, 3).map((o) => `${o.id}:${o.ms}`).join(", "), details: lf.details.slice(0, 4).map((d) => `${d.owner}:${d.ms}:${d.what}`) });
+  Health.onLongFrame(lf);
 }
 
 function startLoafObserver() {
@@ -642,8 +741,16 @@ function startLoafObserver() {
     if (!PerformanceObserver.supportedEntryTypes?.includes("long-animation-frame")) return;
     const obs = new PerformanceObserver((list) => {
       for (const e of list.getEntries()) {
-        const scripts = (e.scripts ?? []).map((s) => ({ url: s.sourceURL || s.sourceLocation || s.invoker || "", ms: s.duration ?? 0 }));
-        registerLongFrame(e.startTime, e.duration, "Long Animation Frame", scripts);
+        const scripts = (e.scripts ?? []).map((s) => ({
+          url: s.sourceURL || "",
+          fn: s.sourceFunctionName || "",
+          invoker: s.invoker || "",
+          start: s.startTime || 0,
+          ms: s.duration ?? 0
+        }));
+        const end = e.startTime + e.duration;
+        const layoutMs = e.renderStart ? end - e.renderStart : 0;
+        registerLongFrame(e.startTime, e.duration, "Long Animation Frame", scripts, layoutMs);
       }
     });
     obs.observe({ type: "long-animation-frame", buffered: true });
@@ -1428,8 +1535,9 @@ function summaryText(r) {
   if (r.longFrames.length) {
     L.push("");
     L.push("## Schlimmste Ruckler");
-    for (const f of [...r.longFrames].sort((a, b) => b.dur - a.dur).slice(0, 8)) {
-      L.push(`- ${f.dur} ms: ${f.owners.map((o) => `${ownerLabel(o.id)} ${o.ms} ms`).join(", ")}`);
+    for (const f of [...r.longFrames].sort((a, b) => b.dur - a.dur).slice(0, 10)) {
+      L.push(`- ${f.dur} ms${f.phase ? ` [${f.phase}]` : ""}: ${f.owners.map((o) => `${ownerLabel(o.id)} ${o.ms} ms`).join(", ")}`);
+      for (const d of (f.details ?? []).slice(0, 3)) L.push(`    · ${ownerLabel(d.owner)}: ${d.what} (${d.ms} ms)`);
     }
   }
   return L.join("\n");
@@ -1558,6 +1666,123 @@ const RecBadge = {
 };
 
 /* ================================================================ */
+/*  Ampel-Button ganz links in der Steuerleiste                       */
+/* ================================================================ */
+
+function canAccess() {
+  if (isGM()) return true;
+  try { return game.settings.get(MODULE_ID, "playerAccess") !== false; } catch { return true; }
+}
+
+function sceneButtonWanted() {
+  if (!canAccess()) return false;
+  try { return game.settings.get(MODULE_ID, "sceneButton") !== false; } catch { return true; }
+}
+
+/** Dauerhafte Probleme, die den Button rot halten, solange sie bestehen. */
+const PERSISTENT_CRITICAL = ["gpu-software", "config-debug"];
+
+const Health = {
+  level: "ok",
+  reasons: [],
+  recent: [],
+  timer: null,
+
+  onLongFrame(lf) {
+    // Szenenwechsel und Weltstart dürfen kurz ruckeln; eigene Fensteraktualisierung zählt nicht.
+    if (lf.phase) return;
+    if (lf.owners[0]?.id === MODULE_ID) return;
+    this.recent.push({ t: lf.t, dur: lf.dur });
+    if (lf.dur >= 250) this.apply();
+  },
+
+  compute() {
+    const t = Date.now();
+    this.recent = this.recent.filter((f) => t - f.t < 60000);
+    const big = this.recent.filter((f) => f.dur >= 250).length;
+    const mid = this.recent.filter((f) => f.dur >= 100).length;
+    const fps = !document.hidden && currentFps > 0 ? currentFps : null;
+    const issues = [...state.issues.values()];
+    const critical = issues.filter((i) => i.severity === "critical" && (PERSISTENT_CRITICAL.includes(i.key) || t - i.last < 120000));
+    const warns = issues.filter((i) => i.severity === "warn" && t - i.last < 120000);
+    const reasons = [];
+    let level = "ok";
+    const bad = (txt) => { level = "bad"; reasons.push(txt); };
+    const warn = (txt) => { if (level === "ok") level = "warn"; reasons.push(txt); };
+    if (big >= 3) bad(`${big} starke Ruckler (über 250 ms) in der letzten Minute`);
+    else if (big >= 1) warn(`${big} starker Ruckler (über 250 ms) in der letzten Minute`);
+    if (mid >= 10) bad(`${mid} Ruckler über 100 ms in der letzten Minute`);
+    else if (mid >= 3 && big < 3) warn(`${mid} Ruckler über 100 ms in der letzten Minute`);
+    if (fps !== null && fps < 20) bad(`nur ${round(fps, 0)} Bilder pro Sekunde`);
+    else if (fps !== null && fps < 35) warn(`nur ${round(fps, 0)} Bilder pro Sekunde`);
+    for (const i of critical.slice(0, 2)) bad(i.title);
+    for (const i of warns.slice(0, 2)) warn(i.title);
+    this.level = level;
+    this.reasons = reasons;
+  },
+
+  ensureButton() {
+    let btn = document.querySelector(".apa-scene-btn");
+    if (!sceneButtonWanted()) {
+      btn?.closest(".apa-scene-li")?.remove();
+      return null;
+    }
+    if (btn) return btn;
+    const menu = document.querySelector("#scene-controls-layers")
+      ?? document.querySelector("#scene-controls menu")
+      ?? document.querySelector("#controls menu, #controls ol.main-controls");
+    if (!menu) return null;
+    const li = document.createElement("li");
+    li.className = "apa-scene-li";
+    btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "control ui-control layer icon fa-solid fa-gauge-high apa-scene-btn";
+    btn.setAttribute("aria-label", "Performance Analyst");
+    btn.dataset.tooltipDirection = "RIGHT";
+    btn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      Analyst.open();
+    });
+    btn.addEventListener("contextmenu", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (state.rec) stopRecording();
+      else startRecording(5, "Schnellaufnahme");
+      this.apply();
+    });
+    li.append(btn);
+    menu.append(li);
+    return btn;
+  },
+
+  apply() {
+    if (!state.ready) return;
+    this.compute();
+    const btn = this.ensureButton();
+    if (!btn) return;
+    btn.classList.toggle("apa-health-warn", this.level === "warn");
+    btn.classList.toggle("apa-health-bad", this.level === "bad");
+    btn.classList.toggle("apa-recording", !!state.rec);
+    const unread = isGM() ? state.inbox.filter((i) => !i.read).length : 0;
+    btn.classList.toggle("apa-inbox", unread > 0);
+    const head = { ok: "Performance: alles im grünen Bereich", warn: "Performance: auffällig", bad: "Performance: echte Probleme" }[this.level];
+    const lines = [`<strong>${head}</strong>`, ...this.reasons.map((r) => `• ${esc(r)}`)];
+    if (state.rec) lines.push(`<em>Aufzeichnung läuft (${fmtDuration(state.rec.elapsed())})</em>`);
+    if (unread) lines.push(`<strong style="color:#6aa7e8">${unread} neue${unread === 1 ? "r" : ""} Spieler-Bericht${unread === 1 ? "" : "e"}</strong>`);
+    lines.push(`<span style="opacity:.7">Klick: Analyst öffnen · Rechtsklick: ${state.rec ? "Aufzeichnung beenden" : "5 Min aufzeichnen"}</span>`);
+    const tip = lines.join("<br>");
+    if (btn.dataset.tooltip !== tip) btn.dataset.tooltip = tip;
+  },
+
+  start() {
+    clearInterval(this.timer);
+    this.timer = setInterval(() => { try { this.apply(); } catch { /* egal */ } }, 2000);
+    this.apply();
+  }
+};
+
+/* ================================================================ */
 /*  Spieler-Berichte per Socket                                       */
 /* ================================================================ */
 
@@ -1575,6 +1800,10 @@ function setupSocket() {
         report.samples = report.samples.slice(-60);
         report.fps = report.fps.slice(-300);
         game.socket.emit(SOCKET, { t: "res", req: msg.req, to: msg.from, user: game.user.id, report });
+      } else if (msg?.t === "push" && isGM()) {
+        receivePlayerReport(msg);
+      } else if (msg?.t === "pushAck" && msg.to === game.user.id) {
+        ui.notifications?.info?.(`Performance-Bericht ist beim Spielleiter angekommen (${msg.gm}).`);
       } else if (msg?.t === "res" && isGM() && msg.to === game.user.id) {
         const user = game.users.get(msg.user);
         state.clients.set(msg.user, { name: user?.name ?? msg.user, at: Date.now(), report: msg.report, pending: false });
@@ -1584,6 +1813,86 @@ function setupSocket() {
       console.debug("Performance Analyst | Socket", err);
     }
   });
+}
+
+/* ---------- Spieler schickt dem SL einen Bericht ---------- */
+
+const INBOX_KEY = `${MODULE_ID}.inbox`;
+const INBOX_CAP = 10;
+
+/** Verkleinert einen Bericht, damit er sicher über die Socket-Verbindung passt. */
+function slimReport(rep) {
+  const r = { ...rep };
+  r.timeline = (rep.timeline ?? []).slice(-3000);
+  r.assets = (rep.assets ?? []).slice(0, 60);
+  r.console = (rep.console ?? []).slice(0, 80);
+  r.longFrames = (rep.longFrames ?? []).slice(-150);
+  r.fps = (rep.fps ?? []).slice(-600);
+  r.samples = (rep.samples ?? []).slice(-120);
+  r.world = null;
+  let size = JSON.stringify(r).length;
+  if (size > 700000) {
+    r.timeline = r.timeline.slice(-400);
+    r.longFrames = r.longFrames.slice(-50);
+    r.console = r.console.slice(0, 30);
+    r.assets = r.assets.slice(0, 25);
+    size = JSON.stringify(r).length;
+  }
+  if (size > 900000) r.timeline = [];
+  return r;
+}
+
+function sendReportToGM(note = "") {
+  const gms = game.users.filter((u) => u.isGM && u.active);
+  const v = Analyst.state.view;
+  let report;
+  if (v.startsWith("saved:") && state.reports[Number(v.slice(6))]) report = state.reports[Number(v.slice(6))];
+  else if (state.rec) report = buildReport(state.rec, { timeline: true });
+  else report = buildReport(state.load, { timeline: false });
+  report = slimReport(report);
+  report.meta = { ...report.meta, note: String(note ?? "").slice(0, 500), sentAt: new Date().toISOString() };
+  if (!gms.length) {
+    ui.notifications.warn("Kein Spielleiter online – der Bericht wird stattdessen als Datei gespeichert.");
+    download(JSON.stringify(report, null, 1), `performance-bericht_${game.user.name}_${fileStamp()}.json`, "application/json");
+    return false;
+  }
+  game.socket.emit(SOCKET, { t: "push", from: game.user.id, report });
+  ui.notifications.info("Performance-Bericht an den Spielleiter gesendet.");
+  return true;
+}
+
+function receivePlayerReport(msg) {
+  const user = game.users.get(msg.from);
+  const item = {
+    id: randomId(),
+    userId: msg.from,
+    name: user?.name ?? msg.report?.meta?.user ?? "Spieler",
+    at: Date.now(),
+    note: msg.report?.meta?.note ?? "",
+    read: false,
+    report: msg.report
+  };
+  state.inbox.unshift(item);
+  if (state.inbox.length > INBOX_CAP) state.inbox.length = INBOX_CAP;
+  persistInbox();
+  ui.notifications.info(`${item.name} hat einen Performance-Bericht gesendet${item.note ? `: „${item.note.slice(0, 80)}“` : ""}. Öffnen über den Performance-Button → Spieler.`);
+  try { game.socket.emit(SOCKET, { t: "pushAck", to: msg.from, gm: game.user.name }); } catch { /* egal */ }
+  Health.apply();
+  Analyst.refreshSoon();
+}
+
+function loadInbox() {
+  try { state.inbox = JSON.parse(localStorage.getItem(INBOX_KEY) ?? "[]") ?? []; } catch { state.inbox = []; }
+}
+
+function persistInbox() {
+  for (let n = Math.min(state.inbox.length, 6); n >= 0; n--) {
+    try {
+      if (n === 0) { localStorage.removeItem(INBOX_KEY); return; }
+      localStorage.setItem(INBOX_KEY, JSON.stringify(state.inbox.slice(0, n)));
+      return;
+    } catch { /* zu groß – weniger versuchen */ }
+  }
 }
 
 function requestClientReports() {
@@ -1626,6 +1935,10 @@ const Analyst = {
   state: { tab: "overview", view: "live:load", sort: "runtime", sortDir: -1, detail: null, filter: "", consoleFilter: "all", markText: "", showSelf: false, worldBusy: false },
   _refreshTimer: null,
   open() {
+    if (!canAccess()) {
+      ui.notifications?.warn?.("Der Spielleiter hat den Performance Analyst für Spieler deaktiviert.");
+      return;
+    }
     if (!this.app) this.app = new AnalystApp();
     this.app.render({ force: true });
     try { this.app.bringToFront?.(); } catch { /* egal */ }
@@ -1645,6 +1958,13 @@ const Analyst = {
     if (v.startsWith("client:")) {
       const c = state.clients.get(v.slice(7));
       if (c?.report) return { report: c.report, live: false, client: c };
+    }
+    if (v.startsWith("inbox:")) {
+      const item = state.inbox.find((i) => i.id === v.slice(6));
+      if (item?.report) {
+        if (!item.read) { item.read = true; persistInbox(); setTimeout(() => Health.apply(), 0); }
+        return { report: item.report, live: false, inbox: item };
+      }
     }
     this.state.view = "live:load";
     return { report: buildReport(state.load, { timeline: false }), live: true };
@@ -1797,30 +2117,52 @@ function moduleDetail(x) {
   </div>`;
 }
 
-function tabFrames(r) {
-  const lf = [...r.longFrames].reverse();
-  const worst = [...r.longFrames].sort((a, b) => b.dur - a.dur).slice(0, 10);
+function tabFrames(r, ctx) {
+  const all = r.longFrames;
+  const inGame = all.filter((f) => !f.phase);
+  const loading = all.length - inGame.length;
+  const lf = [...all].reverse();
+  const worst = [...inGame].sort((a, b) => b.dur - a.dur).slice(0, 10);
   const blame = new Map();
-  for (const f of r.longFrames) for (const o of f.owners) blame.set(o.id, (blame.get(o.id) ?? 0) + o.ms);
-  const blameRows = [...blame.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
+  for (const f of inGame) for (const o of f.owners) blame.set(o.id, (blame.get(o.id) ?? 0) + o.ms);
+  const blameRows = [...blame.entries()].filter(([id]) => ctx.showSelf || id !== MODULE_ID).sort((a, b) => b[1] - a[1]).slice(0, 12);
   const maxB = blameRows[0]?.[1] ?? 1;
-  const frameLine = (f) => `<tr><td>${new Date(f.t).toLocaleTimeString("de-DE")}</td><td class="num ${f.dur > 250 ? "c-err" : f.dur > 100 ? "c-warn" : ""}">${fmtMs(f.dur)}</td>
-    <td>${f.owners.map((o) => `<span class="apa-chip ${o.id === OWNER_RENDER ? "dim" : ""}">${esc(ownerLabel(o.id))} ${round(o.ms, 0)} ms</span>`).join(" ")}</td></tr>`;
+
+  // Was steckt hinter den nicht zuordenbaren / Kern-Anteilen?
+  const unknownWhat = new Map();
+  for (const f of inGame) for (const d of f.details ?? []) {
+    if (![OWNER_UNKNOWN, OWNER_CORE, OWNER_CANVAS].includes(d.owner)) continue;
+    const k = `${d.owner}|${d.what}`;
+    const u = unknownWhat.get(k) ?? { owner: d.owner, what: d.what, ms: 0, n: 0 };
+    u.ms += d.ms;
+    u.n++;
+    unknownWhat.set(k, u);
+  }
+  const unknownRows = [...unknownWhat.values()].sort((a, b) => b.ms - a.ms).slice(0, 15);
+
+  const chipCls = (id) => (id === OWNER_RENDER ? "dim" : id === OWNER_UNKNOWN ? "unk" : "");
+  const frameLine = (f) => `<tr><td>${new Date(f.t).toLocaleTimeString("de-DE")}${f.phase ? `<br><span class="apa-chip phase">${esc(f.phase)}</span>` : ""}</td><td class="num ${f.dur > 250 ? "c-err" : f.dur > 100 ? "c-warn" : ""}">${fmtMs(f.dur)}</td>
+    <td>${f.owners.map((o) => `<span class="apa-chip ${chipCls(o.id)}">${esc(ownerLabel(o.id))} ${round(o.ms, 0)} ms</span>`).join(" ")}
+    ${(f.details ?? []).length ? `<div class="apa-frame-details">${f.details.slice(0, 4).map((d) => `<div><span class="apa-muted">${esc(ownerLabel(d.owner))}:</span> ${esc(d.what)} <span class="apa-muted">${round(d.ms, 0)} ms</span></div>`).join("")}</div>` : ""}</td></tr>`;
   return `
-  <section><h3><i class="fa-solid fa-chart-line"></i> Bildrate</h3>${sparkline(r.fps, "fps")}</section>
+  <section><h3><i class="fa-solid fa-chart-line"></i> Bildrate (Browser)</h3>${sparkline(r.fps, "fps")}</section>
   <div class="apa-grid2">
     <section><h3><i class="fa-solid fa-user-ninja"></i> Wer steckt in den Rucklern?</h3>
       ${blameRows.length ? `<table class="apa-mini">${blameRows.map(([id, ms]) => `<tr><td>${esc(ownerLabel(id))}</td><td class="num">${fmtMs(ms)}</td><td class="w">${bar(ms, maxB, id === OWNER_RENDER ? "dim" : "")}</td></tr>`).join("")}</table>
-      <p class="apa-muted">„Canvas-Rendering / Browser“ ist die Zeit, die keinem Modul-Code zugeordnet werden konnte: Zeichnen, Licht/Sicht, Garbage Collection oder Modul-Code, der nicht über Hooks läuft.</p>` : `<p class="apa-empty">Keine Ruckler über 50 ms erfasst.</p>`}
+      <p class="apa-muted">Nur Ruckler im laufenden Spiel${loading ? ` – ${loading} beim Weltstart oder Szenenwechsel sind ausgeklammert (die sind normal)` : ""}. „Browser“ ist Zeit ohne Skript: Zeichnen, Layout, Garbage Collection.</p>` : `<p class="apa-empty">Keine Ruckler über 50 ms im laufenden Spiel.</p>`}
     </section>
-    <section><h3><i class="fa-solid fa-skull"></i> Schlimmste Ruckler</h3>
+    <section><h3><i class="fa-solid fa-skull"></i> Schlimmste Ruckler im Spiel</h3>
       ${worst.length ? `<table class="apa-mini">${worst.map(frameLine).join("")}</table>` : `<p class="apa-empty">Keine.</p>`}
     </section>
   </div>
-  <section><h3><i class="fa-solid fa-list"></i> Letzte Ruckler (≥ 50 ms)</h3>
+  ${unknownRows.length ? `<section><h3><i class="fa-solid fa-magnifying-glass"></i> Was steckt hinter Foundry-Kern und „Nicht zuordenbar“?</h3>
+    <p class="apa-muted">Das meldet der Browser über diese Ruckler: Funktionsname · Auslöser · Datei. „Window.requestAnimationFrame“ ist Foundrys Zeichenschleife, „Promise.then“ ist nachgelagerter Code nach einem await.</p>
+    <table class="apa-mini"><tr><th>Herkunft</th><th>Was lief</th><th class="num">Zeit</th><th class="num">Ruckler</th></tr>
+    ${unknownRows.map((u) => `<tr><td>${esc(ownerLabel(u.owner))}</td><td class="path">${esc(u.what)}</td><td class="num">${fmtMs(u.ms)}</td><td class="num">${u.n}</td></tr>`).join("")}</table></section>` : ""}
+  <section><h3><i class="fa-solid fa-list"></i> Alle Ruckler (≥ 50 ms)</h3>
     ${lf.length ? `<div class="apa-table-wrap"><table class="apa-table">${lf.slice(0, 120).map(frameLine).join("")}</table></div>` : `<p class="apa-empty">Keine.</p>`}
   </section>
-  ${r.scenes.length ? `<section><h3><i class="fa-solid fa-map"></i> Szenen-Ladezeiten</h3><table class="apa-mini">${[...r.scenes].reverse().map((s) => `<tr><td>${esc(s.name)}</td><td class="num">${fmtMs(s.ms)}</td><td>${Object.entries(s.counts ?? {}).filter(([, v]) => v).map(([k, v]) => `${k}: ${v}`).join(" · ")}</td></tr>`).join("")}</table></section>` : ""}`;
+  ${r.scenes.length ? `<section><h3><i class="fa-solid fa-map"></i> Szenen-Ladezeiten</h3><table class="apa-mini">${[...r.scenes].reverse().map((sc) => `<tr><td>${esc(sc.name)}</td><td class="num">${fmtMs(sc.ms)}</td><td>${Object.entries(sc.counts ?? {}).filter(([, v]) => v).map(([k, v]) => `${k}: ${v}`).join(" · ")}</td></tr>`).join("")}</table></section>` : ""}`;
 }
 
 function tabAssets(r) {
@@ -1905,7 +2247,16 @@ function tabWorld(r, ctx) {
 function tabClients(r, ctx) {
   if (!isGM()) return `<p class="apa-empty">Nur für den Spielleiter.</p>`;
   const clients = [...state.clients.entries()];
+  const inbox = state.inbox;
   return `
+  <section><h3><i class="fa-solid fa-inbox"></i> Eingegangene Berichte von Spielern</h3>
+    ${inbox.length ? `<table class="apa-mini"><tr><th>Spieler</th><th>Gesendet</th><th>Notiz</th><th class="num">Ø FPS</th><th class="num">Ruckler</th><th class="num">Probleme</th><th></th></tr>
+    ${inbox.map((i) => `<tr class="${i.read ? "" : "apa-unread"}"><td>${i.read ? "" : '<i class="fa-solid fa-circle apa-dot"></i> '}${esc(i.name)}</td><td>${new Date(i.at).toLocaleString("de-DE")}</td><td>${esc(i.note || "–")}</td>
+      <td class="num">${i.report?.frames?.avgFps ?? "–"}</td><td class="num">${i.report?.frames?.j100 ?? "–"}</td><td class="num">${i.report?.issues?.length ?? "–"}</td>
+      <td class="nowrap"><button type="button" data-action="viewInbox" data-id="${esc(i.id)}">Ansehen</button> <button type="button" data-action="exportInbox" data-id="${esc(i.id)}" title="Als Datei speichern"><i class="fa-solid fa-file-arrow-down"></i></button> <button type="button" data-action="deleteInbox" data-id="${esc(i.id)}" title="Löschen"><i class="fa-solid fa-trash"></i></button></td></tr>`).join("")}</table>
+    <p class="apa-muted">Spieler senden Berichte selbst über ihren Analyst (Tab „Berichte“ → „An SL senden“). Beim Ansehen kannst du im Tab „Berichte“ die Zusammenfassung kopieren oder das JSON exportieren.</p>`
+    : `<p class="apa-empty">Noch keine Berichte erhalten. Spieler können über ihren Analyst (Tab „Berichte“) einen Bericht an dich senden.</p>`}
+  </section>
   <div class="apa-toolbar">
     <button type="button" data-action="collect"><i class="fa-solid fa-satellite-dish"></i> Berichte der Spieler einsammeln</button>
     <span class="apa-muted">Fragt alle verbundenen Spieler nach ihren Messwerten (ihre laufende Aufzeichnung oder „seit Laden“). Die Spieler brauchen das Modul ebenfalls aktiv – das ist automatisch so, wenn es in der Welt aktiviert ist.</span>
@@ -1923,7 +2274,18 @@ function tabClients(r, ctx) {
 
 function tabLog(r, ctx) {
   const reports = state.reports.map((rep, i) => ({ rep, i })).reverse();
-  return `
+  const v = ctx.view;
+  const sendWhat = v.startsWith("saved:") ? "die angezeigte gespeicherte Aufzeichnung" : state.rec ? "die laufende Aufzeichnung (mit Zeitleiste)" : "deine Messwerte seit dem Laden";
+  const sendBox = !isGM() ? `
+  <section class="apa-send"><h3><i class="fa-solid fa-paper-plane"></i> Problem an den Spielleiter melden</h3>
+    <p>Ruckelt es bei dir? Schick dem Spielleiter deinen Bericht. Gesendet wird ${sendWhat}.
+    ${state.rec ? "" : " Tipp: Noch besser ist eine Aufzeichnung – unten starten, das Ruckelnde nachstellen, dann senden."}</p>
+    <div class="apa-toolbar">
+      <input type="text" name="sendNote" placeholder="Was ist passiert? z. B. „ruckelt beim Bewegen im Kampf“" value="${esc(ctx.sendNote ?? "")}">
+      <button type="button" data-action="sendToGM" class="primary"><i class="fa-solid fa-paper-plane"></i> An SL senden</button>
+    </div>
+  </section>` : "";
+  return `${sendBox}
   <section><h3><i class="fa-solid fa-circle-dot"></i> Aufzeichnung</h3>
     ${state.rec ? `
       <p>Läuft seit ${fmtDuration(state.rec.elapsed())}${state.recEndAt ? `, endet automatisch in ${fmtDuration(state.recEndAt - now())}` : ""}.</p>
@@ -2007,6 +2369,24 @@ class AnalystApp extends ApplicationV2 {
         this.render();
       },
       collect() { requestClientReports(); },
+      sendToGM() {
+        const note = this.element.querySelector("input[name=sendNote]")?.value ?? Analyst.state.sendNote ?? "";
+        if (sendReportToGM(note)) Analyst.state.sendNote = "";
+        this.render();
+      },
+      goSend() { Analyst.state.tab = "log"; this.render(); },
+      viewInbox(event, target) { Analyst.state.view = `inbox:${target.dataset.id}`; Analyst.state.tab = "overview"; this.render(); },
+      exportInbox(event, target) {
+        const item = state.inbox.find((i) => i.id === target.dataset.id);
+        if (item) download(JSON.stringify(item.report, null, 1), `performance-bericht_${item.name}_${fileStamp()}.json`, "application/json");
+      },
+      deleteInbox(event, target) {
+        state.inbox = state.inbox.filter((i) => i.id !== target.dataset.id);
+        persistInbox();
+        if (Analyst.state.view === `inbox:${target.dataset.id}`) Analyst.state.view = "live:load";
+        Health.apply();
+        this.render();
+      },
       viewClient(event, target) { Analyst.state.view = `client:${target.dataset.id}`; Analyst.state.tab = "overview"; this.render(); },
       viewSaved(event, target) { Analyst.state.view = `saved:${target.dataset.id}`; Analyst.state.tab = "overview"; this.render(); },
       deleteSaved(event, target) {
@@ -2040,7 +2420,7 @@ class AnalystApp extends ApplicationV2 {
   };
 
   async _renderHTML() {
-    const { report, live, client } = Analyst.currentReport();
+    const { report, live, client, inbox } = Analyst.currentReport();
     Analyst.live = live;
     const ctx = Analyst.state;
     const tabs = TABS.filter(([, , , gmOnly]) => !gmOnly || isGM());
@@ -2049,6 +2429,7 @@ class AnalystApp extends ApplicationV2 {
     if (state.rec) views.push(`<option value="live:rec" ${ctx.view === "live:rec" ? "selected" : ""}>Live – laufende Aufzeichnung</option>`);
     state.reports.forEach((rep, i) => views.push(`<option value="saved:${i}" ${ctx.view === `saved:${i}` ? "selected" : ""}>Gespeichert – ${esc(rep.meta.label || "Aufzeichnung")}</option>`));
     for (const [id, c] of state.clients) if (c.report) views.push(`<option value="client:${esc(id)}" ${ctx.view === `client:${id}` ? "selected" : ""}>Spieler – ${esc(c.name)}</option>`);
+    if (isGM()) for (const i of state.inbox) views.push(`<option value="inbox:${esc(i.id)}" ${ctx.view === `inbox:${i.id}` ? "selected" : ""}>Gesendet von ${esc(i.name)} – ${new Date(i.at).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</option>`);
 
     const recCtl = state.rec
       ? `<span class="apa-rec"><i class="fa-solid fa-circle"></i> ${fmtDuration(state.rec.elapsed())}</span><button type="button" data-action="recStop"><i class="fa-solid fa-stop"></i> Stopp</button>`
@@ -2060,13 +2441,14 @@ class AnalystApp extends ApplicationV2 {
     }[ctx.tab](report, ctx);
 
     const banner = !live
-      ? `<div class="apa-banner"><i class="fa-solid fa-clock-rotate-left"></i> Du siehst ${client ? `den Bericht von <strong>${esc(client.name)}</strong>` : `die gespeicherte Aufzeichnung <strong>${esc(report.meta.label)}</strong>`} (${fmtDuration(report.meta.durationMs)}, ${new Date(report.meta.created).toLocaleString("de-DE")}).</div>`
+      ? `<div class="apa-banner"><i class="fa-solid fa-clock-rotate-left"></i> Du siehst ${inbox ? `den gesendeten Bericht von <strong>${esc(inbox.name)}</strong>${inbox.note ? ` – Notiz: „${esc(inbox.note)}“` : ""}` : client ? `den Bericht von <strong>${esc(client.name)}</strong>` : `die gespeicherte Aufzeichnung <strong>${esc(report.meta.label)}</strong>`} (${fmtDuration(report.meta.durationMs)}, ${new Date(report.meta.created).toLocaleString("de-DE")}). Export und Zusammenfassung im Tab „Berichte“.</div>`
       : (!WATCH_ENABLED ? `<div class="apa-banner bad"><i class="fa-solid fa-power-off"></i> Die Hintergrund-Überwachung ist in den Einstellungen ausgeschaltet. Es werden kaum Daten gesammelt.</div>` : "");
 
     return `
       <div class="apa-head">
         <nav class="apa-tabs">${tabs.map(([id, label, icon]) => `<a class="${ctx.tab === id ? "active" : ""}" data-action="apaTab" data-tab="${id}"><i class="${icon}"></i> ${label}</a>`).join("")}</nav>
         <div class="apa-head-right">
+          ${!isGM() ? `<button type="button" data-action="goSend" title="Bericht an den Spielleiter senden"><i class="fa-solid fa-paper-plane"></i> An SL senden</button>` : ""}
           <select name="view">${views.join("")}</select>
           ${recCtl}
         </div>
@@ -2107,6 +2489,7 @@ class AnalystApp extends ApplicationV2 {
       this.render();
     });
     el.querySelector("input[name=markText]")?.addEventListener("input", (ev) => { Analyst.state.markText = ev.target.value; });
+    el.querySelector("input[name=sendNote]")?.addEventListener("input", (ev) => { Analyst.state.sendNote = ev.target.value; });
     el.querySelector("input[name=markText]")?.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter") { ev.preventDefault(); addMarker(Analyst.state.markText); Analyst.state.markText = ""; this.render(); }
     });
@@ -2116,11 +2499,11 @@ class AnalystApp extends ApplicationV2 {
         if (!this.rendered) return;
         let auto = true;
         try { auto = game.settings.get(MODULE_ID, "autoRefresh"); } catch { /* Standard */ }
-        if (!auto || !Analyst.live) return;
+        if (!auto || !Analyst.live || this.minimized || document.hidden) return;
         const active = document.activeElement;
         if (active && this.element?.contains(active) && ["INPUT", "SELECT", "TEXTAREA"].includes(active.tagName)) return;
         this.render();
-      }, 2500);
+      }, 4000);
     }
   }
 
@@ -2165,6 +2548,16 @@ function registerSettings() {
     scope: "client", config: true, type: String, default: "critical",
     choices: { off: t("NotifyOff"), critical: t("NotifyCritical"), all: t("NotifyAll") }
   });
+  game.settings.register(MODULE_ID, "sceneButton", {
+    name: t("ButtonName"), hint: t("ButtonHint"),
+    scope: "client", config: true, type: Boolean, default: true,
+    onChange: () => Health.apply()
+  });
+  game.settings.register(MODULE_ID, "playerAccess", {
+    name: t("AccessName"), hint: t("AccessHint"),
+    scope: "world", config: true, type: Boolean, default: true, restricted: true,
+    onChange: () => Health.apply()
+  });
   game.settings.register(MODULE_ID, "autoRefresh", {
     name: t("RefreshName"), hint: t("RefreshHint"),
     scope: "client", config: true, type: Boolean, default: true
@@ -2195,7 +2588,7 @@ function registerKeybinding() {
 function addSidebarButton(app, html) {
   try {
     const root = html instanceof HTMLElement ? html : html?.[0];
-    if (!root || root.querySelector(".apa-open-btn")) return;
+    if (!root || root.querySelector(".apa-open-btn") || !canAccess()) return;
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "apa-open-btn";
@@ -2264,14 +2657,25 @@ function onAllReady() {
     setTimeout(() => { resolvePendingOwners().catch(() => { state.pendingSourceSearch = false; }); }, 4000);
   }
   try { setupSocket(); } catch { /* egal */ }
+  if (isGM()) loadInbox();
+  try { Health.start(); } catch (err) { console.debug("Performance Analyst | Button", err); }
   const queued = state.pendingNotes.splice(0);
   for (const issue of queued) notifyIssue(issue);
 }
 
-Hooks.on("canvasInit", () => { state.canvasInitAt = now(); });
+Hooks.on("canvasInit", () => {
+  state.canvasInitAt = now();
+  state.sceneLoading = true;
+});
+
+Hooks.on("renderSceneControls", () => {
+  try { Health.apply(); } catch { /* egal */ }
+});
 
 Hooks.on("canvasReady", (cv) => {
   if (!state.phases.firstCanvas) state.phases.firstCanvas = now();
+  // Kurz nachladen lassen (Texturen, Licht), erst dann zählen Ruckler wieder normal.
+  setTimeout(() => { state.sceneLoading = false; }, 4000);
   const scene = cv?.scene ?? globalThis.canvas?.scene;
   const ms = state.canvasInitAt ? now() - state.canvasInitAt : null;
   let counts = {};

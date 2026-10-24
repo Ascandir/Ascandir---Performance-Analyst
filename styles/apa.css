@@ -218,3 +218,55 @@ tr.kind-self .apa-kind { color: var(--apa-accent); }
 @media (max-width: 900px) {
   .apa-grid2, .apa-detail { grid-template-columns: 1fr; }
 }
+
+/* Ruckler-Details */
+.apa-chip.unk { border-color: #8a6d3b; }
+.apa-chip.phase { font-size: 10px; color: var(--apa-muted); margin-top: 2px; }
+.apa-frame-details { margin-top: 4px; font-size: 11px; line-height: 1.35; word-break: break-word; }
+
+/* Ampel-Button in der linken Steuerleiste */
+#scene-controls .apa-scene-btn.apa-health-warn,
+.apa-scene-btn.apa-health-warn {
+  color: #f0b23b;
+  box-shadow: 0 0 0 1px #f0b23b inset, 0 0 8px rgba(240, 178, 59, .55);
+}
+#scene-controls .apa-scene-btn.apa-health-bad,
+.apa-scene-btn.apa-health-bad {
+  color: #fff;
+  background: #b3261e;
+  box-shadow: 0 0 0 1px #ff6b61 inset, 0 0 12px rgba(224, 70, 60, .8);
+  animation: apa-pulse 1.4s ease-in-out infinite;
+}
+.apa-scene-btn.apa-recording::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #e0605a;
+  animation: apa-blink 1.2s infinite;
+}
+.apa-scene-btn { position: relative; }
+@keyframes apa-pulse {
+  50% { box-shadow: 0 0 0 1px #ff6b61 inset, 0 0 2px rgba(224, 70, 60, .3); }
+}
+
+/* Spieler-Berichte */
+.apa-scene-btn.apa-inbox::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #6aa7e8;
+  box-shadow: 0 0 6px #6aa7e8;
+}
+.apa-app .apa-send { border-color: var(--apa-accent); }
+.apa-app button.primary { background: var(--apa-accent); color: #1a1a1a; border-color: var(--apa-accent); font-weight: bold; }
+.apa-app .apa-dot { color: var(--apa-dep); font-size: 8px; vertical-align: 2px; }
+.apa-app tr.apa-unread td { font-weight: bold; }
+.apa-app td.nowrap { white-space: nowrap; }

@@ -14,16 +14,24 @@ https://github.com/Ascandir/Ascandir---Performance-Analyst/releases/latest/downl
 
 ## Öffnen
 
-- **Spieleinstellungen → Ascandir - Performance Analyst → Analyse öffnen**
+- **Ampel-Button ganz links** in der Steuerleiste (Tachometer-Symbol). Er wird **gelb**, wenn die Leistung auffällig ist, und **rot pulsierend** bei echten Problemen (z. B. mehrere starke Ruckler in der letzten Minute, sehr niedrige Bildrate, Software-Rendering). Mit der Maus darüberfahren zeigt den Grund. **Rechtsklick** startet/beendet eine 5-Minuten-Aufzeichnung. Ein **blauer Punkt** zeigt dem SL neue Spieler-Berichte an.
 - oder Tastenkürzel **Alt + Umschalt + P**
-- oder unten im Einstellungs-Tab der Seitenleiste der Button **Performance Analyst**
+- oder **Spieleinstellungen → Ascandir - Performance Analyst → Analyse öffnen**
+
+Der Analyst steht **SL und Spielern** zur Verfügung (abschaltbar über „Spieler dürfen den Analyst nutzen“). Ruckler beim Weltstart und direkt nach einem Szenenwechsel werden gekennzeichnet und färben den Button nicht.
+
+## Spieler melden Probleme selbst
+
+Ruckelt es bei einem Spieler, öffnet er seinen Analyst und klickt oben auf **An SL senden** (oder Tab **Berichte**). Er kann kurz notieren, was passiert ist. Am besten startet er vorher eine Aufzeichnung und stellt das Problem nach – dann geht die komplette Zeitleiste mit.
+
+Beim SL erscheint eine Benachrichtigung und der blaue Punkt am Button. Die Berichte liegen im Tab **Spieler → Eingegangene Berichte** (die letzten 10, bleiben auch nach Neuladen erhalten) und lassen sich ansehen, als JSON speichern oder im Tab **Berichte** als Zusammenfassung kopieren. Ist kein SL online, wird der Bericht beim Spieler als Datei gespeichert.
 
 ## Was gemessen wird
 
 | Bereich | Was du siehst |
 |---|---|
 | **Module** | Rechenzeit pro Modul, getrennt in *Startzeit* (bis die Welt bereit ist) und *Laufzeit* (danach), Anzahl Aufrufe, langsamster Aufruf, die teuersten Hooks des Moduls (Zeile anklicken) |
-| **Ruckler** | Bilder, die länger als 50 ms gebraucht haben, mit den Modulen, die in diesem Moment gerechnet haben. Dazu Bildraten-Verlauf und Szenen-Ladezeiten |
+| **Ruckler** | Bilder, die länger als 50 ms gebraucht haben, mit den Modulen, die in diesem Moment gerechnet haben – und darunter, *was* genau lief (Hook, Funktion, Auslöser, Datei). Ein eigener Abschnitt schlüsselt „Foundry-Kern“ und „Nicht zuordenbar“ auf. Dazu Bildraten-Verlauf und Szenen-Ladezeiten |
 | **Dateien** | Alle geladenen Bilder, Sounds, Videos und Skripte mit Größe und Ladezeit. Bilder der aktuellen Szene mit Pixelgröße und geschätztem Grafikspeicher. Nicht gefundene Dateien |
 | **Konsole** | Fehler, Warnungen und veraltete Foundry-Aufrufe, zusammengefasst und dem Modul zugeordnet |
 | **Netzwerk** | Nachrichten pro Modul und wer wie viele Dokument-Änderungen auslöst |
@@ -46,7 +54,7 @@ Das Modul meldet automatisch unter anderem:
 - **Module, die nicht für deine Foundry-Version freigegeben sind**
 - **Langer Chat-Verlauf**, langsam ladende Szenen, viele Lichter, Wände oder Token
 
-Kritische Probleme erscheinen beim SL als Benachrichtigung. Das kann in den Einstellungen geändert werden.
+Kritische Probleme erscheinen beim SL als Benachrichtigung (einstellbar) und färben den Ampel-Button.
 
 ## Aufzeichnung (zum gezielten Testen)
 
@@ -81,6 +89,8 @@ Die letzten 5 Aufzeichnungen bleiben im Browser auch nach einem Neuladen erhalte
 - **Hintergrund-Überwachung**: alles an oder aus (pro Browser, wirkt nach Neuladen)
 - **Konsole mitlesen**: Fehler, Warnungen und veraltete Aufrufe zählen (pro Browser)
 - **Hinweise einblenden**: nie / nur kritisch / kritisch und Warnungen (nur SL)
+- **Ampel-Button in der Steuerleiste**: ein/aus (pro Browser)
+- **Spieler dürfen den Analyst nutzen** (Welt, nur SL)
 - **Fenster automatisch aktualisieren**
 - **Spieler-Berichte erlauben** (Welt, nur SL)
 - **Grenzen für Bilder, Audio und Video** in MB (Welt, nur SL)

@@ -14,7 +14,7 @@
       "NotifyCritical": "Critical problems only",
       "NotifyAll": "Critical problems and warnings",
       "RefreshName": "Auto-refresh window",
-      "RefreshHint": "Refreshes the live view every 2.5 seconds.",
+      "RefreshHint": "Refreshes the live view every 4 seconds.",
       "RemoteName": "Allow player reports",
       "RemoteHint": "The GM may collect measurements from player browsers (browser, GPU, FPS, module run times, problems).",
       "limitImageMBName": "Image limit (MB)",
@@ -22,7 +22,11 @@
       "limitAudioMBName": "Audio limit (MB)",
       "limitAudioMBHint": "Larger audio files are reported as a problem.",
       "limitVideoMBName": "Video limit (MB)",
-      "limitVideoMBHint": "Larger video files are reported as a problem."
+      "limitVideoMBHint": "Larger video files are reported as a problem.",
+      "ButtonName": "Status button in scene controls",
+      "ButtonHint": "Shows a performance button on the far left that turns amber on anomalies and red on real problems. Click opens the analyst, right-click starts/stops a 5-minute recording.",
+      "AccessName": "Players may use the analyst",
+      "AccessHint": "Players can use the window and the status button and see their own measurements. World scan and player reports remain GM-only."
     },
     "Keybinding": {
       "Open": "Open Performance Analyst"
