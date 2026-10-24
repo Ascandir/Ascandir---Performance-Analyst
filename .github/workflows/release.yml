@@ -1,0 +1,57 @@
+name: Release erstellen
+
+# Läuft automatisch, sobald auf main eine neue Version in module.json landet.
+# Gibt es zu dieser Version noch kein Release, wird es gebaut und veröffentlicht.
+on:
+  push:
+    branches: [main]
+    paths: [module.json]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version lesen und prüfen, ob es schon ein Release gibt
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(jq -r .version module.json)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if gh release view "v$VERSION" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release v$VERSION existiert bereits – nichts zu tun."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Zip bauen
+        # Jede Version bekommt eigene Dateinamen, damit kein Cache alte Dateien ausliefert.
+        if: steps.ver.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          OUT=dist/ascandir-performance-analyst
+          mkdir -p "$OUT/scripts" "$OUT/styles"
+          cp -r README.md lang "$OUT/"
+          cp scripts/main.js "$OUT/scripts/main-$VERSION.js"
+          cp styles/apa.css "$OUT/styles/apa-$VERSION.css"
+          jq --arg v "$VERSION" '.version = $v | .esmodules = ["scripts/main-\($v).js"] | .styles = ["styles/apa-\($v).css"]' module.json > "$OUT/module.json"
+          cp "$OUT/module.json" release-module.json
+          cd dist && zip -r ../ascandir-performance-analyst.zip ascandir-performance-analyst
+
+      - name: Release veröffentlichen
+        if: steps.ver.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          mv release-module.json module.json
+          gh release create "v$VERSION" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "v$VERSION" --generate-notes \
+            module.json ascandir-performance-analyst.zip

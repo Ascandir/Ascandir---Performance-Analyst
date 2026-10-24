@@ -1,0 +1,31 @@
+{
+  "APA": {
+    "Settings": {
+      "OpenName": "Performance Analyst",
+      "OpenLabel": "Open analysis",
+      "OpenHint": "Opens the window with all measurements (interface in German). Shortcut: Alt + Shift + P.",
+      "WatchName": "Background monitoring",
+      "WatchHint": "Continuously measures module run times, stutters, files and console. Turn off when not needed (applies after reload).",
+      "ConsoleName": "Read console",
+      "ConsoleHint": "Counts errors, warnings and deprecated calls per module. Side effect: browser dev tools show this module as the sender of messages (applies after reload).",
+      "NotifyName": "Show notifications (GM only)",
+      "NotifyHint": "Shows detected problems as notifications at the top of the screen.",
+      "NotifyOff": "Never",
+      "NotifyCritical": "Critical problems only",
+      "NotifyAll": "Critical problems and warnings",
+      "RefreshName": "Auto-refresh window",
+      "RefreshHint": "Refreshes the live view every 2.5 seconds.",
+      "RemoteName": "Allow player reports",
+      "RemoteHint": "The GM may collect measurements from player browsers (browser, GPU, FPS, module run times, problems).",
+      "limitImageMBName": "Image limit (MB)",
+      "limitImageMBHint": "Larger image files are reported as a problem.",
+      "limitAudioMBName": "Audio limit (MB)",
+      "limitAudioMBHint": "Larger audio files are reported as a problem.",
+      "limitVideoMBName": "Video limit (MB)",
+      "limitVideoMBHint": "Larger video files are reported as a problem."
+    },
+    "Keybinding": {
+      "Open": "Open Performance Analyst"
+    }
+  }
+}
