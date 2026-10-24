@@ -2,7 +2,7 @@
 
 Findet heraus, **welches Modul dein Foundry ausbremst**. Das Modul misst im Hintergrund, wie viel Rechenzeit jedes installierte Modul verbraucht, ordnet Ruckler einem Verursacher zu und prüft Konsole, Dateien, Texturen und Einstellungen auf typische Performance-Fresser. Alles lässt sich aufzeichnen und exportieren.
 
-Funktioniert **spielsystemunabhängig**. Getestet mit Foundry v14.368 (ab v13 lauffähig), dnd5e 6.0.6.
+Funktioniert **spielsystemunabhängig**. Getestet mit Foundry v14.369.1 (ab v13 lauffähig), dnd5e 6.0.6.
 
 ## Installation
 
